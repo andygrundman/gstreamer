@@ -129,6 +129,8 @@ enum
   PROP_AUD,
   PROP_REPEAT_SEQUENCE_HEADER,
   PROP_NUM_SLICES,
+  PROP_INTRA_REFRESH,
+  PROP_SINGLE_SLICE_INTRA_REFRESH,
 };
 
 #define DEFAULT_PRESET            GST_NV_ENCODER_PRESET_DEFAULT
@@ -155,6 +157,8 @@ enum
 #define DEFAULT_AUD               TRUE
 #define DEFAULT_REPEAT_SEQUENCE_HEADER FALSE
 #define DEFAULT_NUM_SLICES        0
+#define DEFAULT_INTRA_REFRESH     0
+#define DEFAULT_SINGLE_SLICE_INTRA_REFRESH 0
 
 typedef enum
 {
@@ -221,6 +225,8 @@ typedef struct _GstNvH265Encoder
   gboolean aud;
   gboolean repeat_sequence_header;
   guint num_slices;
+  gboolean intra_refresh;
+  gboolean single_slice_intra_refresh;
 } GstNvH265Encoder;
 
 typedef struct _GstNvH265EncoderClass
@@ -610,6 +616,15 @@ gst_nv_h265_encoder_class_init (GstNvH265EncoderClass * klass, gpointer data)
             "Number of slices per frame (0 = default, 1-32 = specific count)",
             0, 32, DEFAULT_NUM_SLICES, conditional_param_flags));
   }
+  g_object_class_install_property (object_class, PROP_INTRA_REFRESH,
+      g_param_spec_boolean ("intra-refresh", "Intra-Refresh",
+          "Use Periodic Intra Refresh instead of IDR frames, "
+          "use gop-size to indicate refresh period in frames",
+          DEFAULT_INTRA_REFRESH, param_flags));
+  g_object_class_install_property (object_class, PROP_SINGLE_SLICE_INTRA_REFRESH,
+      g_param_spec_boolean ("single-slice-intra-refresh", "Single Slice Intra-Refresh",
+          "Use single slice intra refresh",
+          DEFAULT_SINGLE_SLICE_INTRA_REFRESH, param_flags));
 
   GstPadTemplate *pad_templ = gst_pad_template_new ("sink",
       GST_PAD_SINK, GST_PAD_ALWAYS, cdata->sink_caps);
@@ -729,6 +744,8 @@ gst_nv_h265_encoder_init (GstNvH265Encoder * self)
   self->aud = DEFAULT_AUD;
   self->repeat_sequence_header = DEFAULT_REPEAT_SEQUENCE_HEADER;
   self->num_slices = DEFAULT_NUM_SLICES;
+  self->intra_refresh = DEFAULT_INTRA_REFRESH;
+  self->single_slice_intra_refresh = DEFAULT_SINGLE_SLICE_INTRA_REFRESH;
 
   self->parser = gst_h265_parser_new ();
   self->sei_array = g_array_new (FALSE, FALSE, sizeof (GstH265SEIMessage));
@@ -1018,6 +1035,12 @@ gst_nv_h265_encoder_set_property (GObject * object, guint prop_id,
     case PROP_NUM_SLICES:
       update_uint (self, &self->num_slices, value, UPDATE_INIT_PARAM);
       break;
+    case PROP_INTRA_REFRESH:
+      update_boolean (self, &self->intra_refresh, value, UPDATE_INIT_PARAM);
+      break;
+    case PROP_SINGLE_SLICE_INTRA_REFRESH:
+      update_boolean (self, &self->single_slice_intra_refresh, value, UPDATE_INIT_PARAM);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -1143,6 +1166,12 @@ gst_nv_h265_encoder_get_property (GObject * object, guint prop_id,
       break;
     case PROP_NUM_SLICES:
       g_value_set_uint (value, self->num_slices);
+      break;
+    case PROP_INTRA_REFRESH:
+      g_value_set_boolean (value, self->intra_refresh);
+      break;
+    case PROP_SINGLE_SLICE_INTRA_REFRESH:
+      g_value_set_boolean (value, self->single_slice_intra_refresh);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1626,6 +1655,25 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
   if (dev_caps->dynamic_slice_mode && self->num_slices > 0) {
     hevc_config->sliceMode = 3;
     hevc_config->sliceModeData = self->num_slices;
+  }
+
+  if (self->intra_refresh) {
+    // match ffmpeg which uses gopLength to indicate the intra refresh period,
+    // after which we set it to infinite.
+    if (self->gop_size < 2) {
+      GST_ERROR_OBJECT (self, "intra-refresh requires gop-size > 1 to indicate the refresh interval");
+      return FALSE;
+    }
+    hevc_config->enableIntraRefresh = 1;
+    hevc_config->intraRefreshPeriod = self->gop_size;
+    hevc_config->intraRefreshCnt = self->gop_size - 1;
+    hevc_config->outputRecoveryPointSEI = 1;
+    if (dev_caps->intra_refresh) {
+      hevc_config->singleSliceIntraRefresh = self->single_slice_intra_refresh ? 1 : 0;
+    }
+    config->gopLength = NVENC_INFINITE_GOPLENGTH;
+    config->frameIntervalP = 1;
+    hevc_config->idrPeriod = NVENC_INFINITE_GOPLENGTH;
   }
 
   GstVideoColorimetry cinfo;
